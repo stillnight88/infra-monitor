@@ -1,8 +1,12 @@
 package main
 
 import (
-	"log"
+	"context"
+	"log/slog"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -11,59 +15,95 @@ import (
 	"github.com/stillnight88/infra-monitor/server/metrics"
 )
 
-const offlineThreshold = 10 * time.Second
-const heartbeatInterval = 5 * time.Second
+const (
+	offlineThreshold  = 10 * time.Second
+	heartbeatInterval = 5 * time.Second
+	shutdownTimeout   = 5 * time.Second
+)
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil))) // Structured logger — JSON
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	store := metrics.New()
 	h := hub.New()
 	agentHandler := handler.New(store, h)
 	dashboardHandler := handler.NewDashboard(h)
 
-	// Hub broadcast loop — must run before any connections arrive.
-	go h.Run()
-
-	// Heartbeat — checks for stale agents every 5 seconds.
-	go runHeartbeat(store, h)
+	// Hub and heartbeat run in their own goroutines.
+	go h.Run(ctx)
+	go runHeartbeat(ctx, store, h)
 
 	r := gin.Default()
 
-	r.GET("/ws/agent", agentHandler.AgentWS)
-	r.GET("/ws/dashboard", dashboardHandler.DashboardWS)
+	r.GET("/ws/agent", agentHandler.AgentWS(ctx))
+	r.GET("/ws/dashboard", dashboardHandler.DashboardWS(ctx))
 	r.GET("/state", func(c *gin.Context) {
 		c.JSON(http.StatusOK, store.All())
 	})
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
 
-	log.Println("server listening on :8080")
-	if err := r.Run(":8080"); err != nil {
-		log.Fatalf("server: %v", err)
+	srv := &http.Server{
+		Addr:    ":8080",
+		Handler: r,
 	}
+
+	go func() {
+		slog.Info("server listening", "addr", ":8080")
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("server error", "err", err)
+			os.Exit(1)
+		}
+	}()
+
+	<-ctx.Done()
+	slog.Info("shutdown signal received")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("server shutdown error", "err", err)
+	}
+
+	slog.Info("server stopped cleanly")
 }
 
-func runHeartbeat(store *metrics.Store, h *hub.Hub) {
+func runHeartbeat(ctx context.Context, store *metrics.Store, h *hub.Hub) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		snapshot := store.All()
-		changed := false
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("heartbeat shutting down")
+			return
 
-		for agentID, state := range snapshot {
-			if !state.Online {
-				continue
-			}
-			if time.Since(time.Unix(state.Payload.Timestamp, 0)) > offlineThreshold {
-				log.Printf("agent offline: %s", agentID)
-				store.MarkOffline(agentID)
-				changed = true
-			}
-		}
+		case <-ticker.C:
+			snapshot := store.All()
+			changed := false
 
-		if changed {
-			select {
-			case h.Broadcast <- store.All():
-			default:
-				log.Printf("heartbeat: broadcast channel full — skipping")
+			for agentID, state := range snapshot {
+				if !state.Online {
+					continue
+				}
+				if time.Since(time.Unix(state.Payload.Timestamp, 0)) > offlineThreshold {
+					slog.Info("agent offline", "agent", agentID)
+					store.MarkOffline(agentID)
+					changed = true
+				}
+			}
+
+			if changed {
+				select {
+				case h.Broadcast <- store.All():
+				default:
+					slog.Warn("heartbeat: broadcast channel full — skipping")
+				}
 			}
 		}
 	}

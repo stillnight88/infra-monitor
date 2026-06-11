@@ -1,8 +1,9 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -28,7 +29,7 @@ func (h *Hub) Register(conn *websocket.Conn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.dashboards[conn] = struct{}{}
-	log.Printf("dashboard registered — total: %d", len(h.dashboards))
+	slog.Info("dashboard registered", "total", len(h.dashboards))
 }
 
 // Unregister removes a dashboard connection from the hub.
@@ -36,13 +37,24 @@ func (h *Hub) Unregister(conn *websocket.Conn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.dashboards, conn)
-	log.Printf("dashboard unregistered — total: %d", len(h.dashboards))
+	slog.Info("dashboard unregistered", "total", len(h.dashboards))
 }
 
 // Run starts the broadcast loop.
-func (h *Hub) Run() {
-	for snapshot := range h.Broadcast {
-		h.broadcast(snapshot)
+func (h *Hub) Run(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("hub shutting down")
+			h.closeAll()
+			return
+
+		case snapshot, ok := <-h.Broadcast:
+			if !ok {
+				return
+			}
+			h.broadcast(snapshot)
+		}
 	}
 }
 
@@ -50,7 +62,7 @@ func (h *Hub) Run() {
 func (h *Hub) broadcast(snapshot map[string]metrics.AgentState) {
 	data, err := json.Marshal(snapshot)
 	if err != nil {
-		log.Printf("hub marshal: %v", err)
+		slog.Error("hub marshal", "err", err)
 		return
 	}
 
@@ -65,10 +77,20 @@ func (h *Hub) broadcast(snapshot map[string]metrics.AgentState) {
 	h.mu.RUnlock()
 
 	for _, conn := range conns {
-		if err := conn.WriteMessage(websocket.TextMessage,data); err != nil {
-			log.Printf("hub write error — removing dashboard: %v", err)
+		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			slog.Warn("hub write failed — removing dashboard", "err", err)
 			h.Unregister(conn)
 			conn.Close()
 		}
+	}
+}
+
+func (h *Hub) closeAll() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	for conn := range h.dashboards {
+		conn.Close()
+		delete(h.dashboards, conn)
 	}
 }

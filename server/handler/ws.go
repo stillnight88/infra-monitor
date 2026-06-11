@@ -1,8 +1,9 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -28,37 +29,51 @@ func New(store *metrics.Store, h *hub.Hub) *Handler {
 }
 
 // AgentWS handles one agent connection, Each agent gets its own goroutine running this function.
-func (h *Handler) AgentWS(c *gin.Context) {
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
-	if err != nil {
-		log.Printf("upgrade: %v", err)
-		return
-	}
-	defer conn.Close()
-	log.Printf("agent connected: %s", c.Request.RemoteAddr)
-
-	for {
-		_, data, err := conn.ReadMessage()
+func (h *Handler) AgentWS(ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
-			log.Printf("agent disconnected: %v", err)
+			slog.Error("agent upgrade", "err", err)
 			return
 		}
+		defer conn.Close()
 
-		var payload shared.MetricsPayload
-		if err := json.Unmarshal(data, &payload); err != nil {
-			log.Printf("unmarshal: %v", err)
-			continue
+		slog.Info("agent connected", "addr", c.Request.RemoteAddr)
+
+		for {
+			select {
+			case <-ctx.Done():
+				slog.Info("agent handler shutting down", "addr", c.Request.RemoteAddr)
+				return
+			default:
+			}
+
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				slog.Info("agent disconnected", "addr", c.Request.RemoteAddr, "err", err)
+				return
+			}
+
+			var payload shared.MetricsPayload
+			if err := json.Unmarshal(data, &payload); err != nil {
+				slog.Warn("agent unmarshal", "err", err)
+				continue
+			}
+
+			h.store.Set(payload)
+
+			select {
+			case h.hub.Broadcast <- h.store.All():
+			default:
+				slog.Warn("broadcast channel full — skipping tick", "agent", payload.AgentID)
+			}
+
+			slog.Info("metrics received",
+				"agent", payload.AgentID,
+				"cpu", payload.CPU,
+				"ram", payload.RAM,
+				"disk", payload.Disk,
+			)
 		}
-
-		h.store.Set(payload)
-		
-		select {
-		case h.hub.Broadcast <- h.store.All():
-		default:
-			log.Printf("hub broadcast channel full — skipping tick")
-		}
-
-		log.Printf("[%s] CPU: %.1f%%  RAM: %.1f%%  Disk: %.1f%%",
-			payload.AgentID, payload.CPU, payload.RAM, payload.Disk)
 	}
 }
