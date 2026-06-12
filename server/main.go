@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/stillnight88/infra-monitor/server/config"
 	"github.com/stillnight88/infra-monitor/server/handler"
 	"github.com/stillnight88/infra-monitor/server/hub"
 	"github.com/stillnight88/infra-monitor/server/metrics"
@@ -24,6 +25,8 @@ const (
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil))) // Structured logger — JSON
 
+	cfg := config.Load()
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -36,7 +39,8 @@ func main() {
 	go h.Run(ctx)
 	go runHeartbeat(ctx, store, h)
 
-	r := gin.Default()
+	r := gin.New()
+	r.Use(gin.Recovery())
 
 	r.GET("/ws/agent", agentHandler.AgentWS(ctx))
 	r.GET("/ws/dashboard", dashboardHandler.DashboardWS(ctx))
@@ -48,12 +52,12 @@ func main() {
 	})
 
 	srv := &http.Server{
-		Addr:    ":8080",
+		Addr:    cfg.Addr,
 		Handler: r,
 	}
 
 	go func() {
-		slog.Info("server listening", "addr", ":8080")
+		slog.Info("server listening", "addr", cfg.Addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("server error", "err", err)
 			os.Exit(1)
