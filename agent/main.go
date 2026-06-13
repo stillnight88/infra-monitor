@@ -1,40 +1,32 @@
 package main
 
 import (
-	"log"
+	"context"
+	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
+	"github.com/stillnight88/infra-monitor/agent/config"
 	"github.com/stillnight88/infra-monitor/agent/ws"
 )
 
 func main() {
-	serverURL := envOrDefault("SERVER_URL", "ws://localhost:8080/ws/agent")
-	agentID := envOrDefault("AGENT_ID", mustHostname())
-	hostname := mustHostname()
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
 
-	log.Printf("starting agent — id: %s  host: %s  server: %s", agentID, hostname, serverURL)
+	cfg := config.Load()
 
-	client, err := ws.New(serverURL, agentID, hostname)
-	if err != nil {
-		log.Fatalf("connect: %v", err)
-	}
+	slog.Info("agent starting",
+		"agent_id", cfg.AgentID,
+		"hostname", cfg.Hostname,
+		"server", cfg.ServerURL,
+	)
 
-	if err := client.Run(); err != nil {
-		log.Fatalf("run: %v", err)
-	}
-}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-func mustHostname() string {
-	h, err := os.Hostname()
-	if err != nil {
-		log.Fatalf("hostname: %v", err)
-	}
-	return h
-}
+	client := ws.New(cfg.ServerURL, cfg.AgentID, cfg.Hostname)
+	client.Run(ctx)
 
-func envOrDefault(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
+	slog.Info("agent stopped cleanly")
 }
