@@ -1,26 +1,32 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/stillnight88/infra-monitor/dashboard/config"
 	"github.com/stillnight88/infra-monitor/dashboard/ui"
 	"github.com/stillnight88/infra-monitor/dashboard/ws"
 )
 
-func main()  {
-	serverURL := envOrDefault("SERVER_URL", "ws://localhost:8080/ws/dashboard")
+func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
 
-	client, err := ws.New(serverURL)
-	if err != nil {
-		log.Fatalf("connect to server: %v", err)
-	}
+	cfg := config.Load()
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	client := ws.New(cfg.ServerURL)
 
 	ch := make(chan ws.SnapshotMsg, 1)
 
-	go client.Listen(ch)
+	go client.Listen(ctx, ch)
 
 	model := ui.New(ch)
 
@@ -29,11 +35,6 @@ func main()  {
 		fmt.Fprintf(os.Stderr, "ui error: %v\n", err)
 		os.Exit(1)
 	}
-}
 
-func envOrDefault(key, fallback string) string  {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
+	slog.Info("dashboard stopped cleanly")
 }
