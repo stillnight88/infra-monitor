@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -16,6 +17,10 @@ var (
 			Foreground(lipgloss.Color("12")).
 			PaddingBottom(1)
 
+	subtitleStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("8")).
+			PaddingBottom(1)
+
 	onlineStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("10")).
 			Bold(true)
@@ -24,9 +29,6 @@ var (
 			Foreground(lipgloss.Color("9")).
 			Bold(true)
 
-	rowStyle = lipgloss.NewStyle().
-			PaddingLeft(1)
-
 	tableHeaderStyle = lipgloss.NewStyle().
 				Bold(true).
 				Underline(true).
@@ -34,10 +36,15 @@ var (
 
 	borderStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("5")).
 			Padding(1, 2)
 
 	dimStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("8"))
+
+	barNormalStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	barWarningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
+	barDangerStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 )
 
 // SnapshotReceived is a Bubble Tea message carrying a new snapshot.
@@ -103,8 +110,6 @@ func (m Model) View() string {
 		return dimStyle.Render("waiting for agents...") + "\n"
 	}
 
-	header := headerStyle.Render("Infrastructure Monitor")
-
 	// Maps are unordered — without this the table jumps around every render.
 	ids := make([]string, 0, len(m.snapshot))
 	for id := range m.snapshot {
@@ -112,8 +117,20 @@ func (m Model) View() string {
 	}
 	sort.Strings(ids)
 
+	online := 0
+	for _, state := range m.snapshot {
+		if state.Online {
+			online++
+		}
+	}
+
+	header := headerStyle.Render("Infrastructure Monitor")
+	subtitle := subtitleStyle.Render(
+		fmt.Sprintf("%d online / %d total", online, len(m.snapshot)),
+	)
+
 	tableHeader := tableHeaderStyle.Render(
-		fmt.Sprintf("%-20s %-10s %8s %8s %8s %15s",
+		fmt.Sprintf("%-22s %-10s %-16s %-16s %-16s %s",
 			"Machine", "Status", "CPU", "RAM", "Disk", "Last Seen"),
 	)
 
@@ -126,27 +143,58 @@ func (m Model) View() string {
 
 	help := dimStyle.Render("  q to quit")
 
-	return fmt.Sprintf("%s\n%s\n%s\n", header, table, help)
+	return fmt.Sprintf("%s\n%s\n%s\n%s\n", header, subtitle, table, help)
 }
 
 func renderRow(id string, state metrics.AgentState) string {
-	status := onlineStyle.Render("ONLINE ")
-	cpu := fmt.Sprintf("%6.1f%%", state.Payload.CPU)
-	ram := fmt.Sprintf("%6.1f%%", state.Payload.RAM)
-	disk := fmt.Sprintf("%6.1f%%", state.Payload.Disk)
 	lastSeen := ws.LastSeen(state.Payload.Timestamp)
 
-	if !state.Online {
-		status = offlineStyle.Render("OFFLINE")
-		cpu = dimStyle.Render("   ---")
-		ram = dimStyle.Render("   ---")
-		disk = dimStyle.Render("   ---")
+	var status, cpu, ram, disk, seen string
+
+	if state.Online {
+		status = onlineStyle.Render(fmt.Sprintf("%-8s", "ONLINE"))
+		cpu = fmt.Sprintf("%5.1f%% ", state.Payload.CPU) + renderBar(state.Payload.CPU)
+		ram = fmt.Sprintf("%5.1f%% ", state.Payload.RAM) + renderBar(state.Payload.RAM)
+		disk = fmt.Sprintf("%5.1f%% ", state.Payload.Disk) + renderBar(state.Payload.Disk)
+		seen = fmt.Sprintf("%10s", lastSeen)
+	} else {
+		status = offlineStyle.Render(fmt.Sprintf("%-8s", "OFFLINE"))
+		cpu = dimStyle.Render(fmt.Sprintf("%14s", "---"))
+		ram = dimStyle.Render(fmt.Sprintf("%14s", "---"))
+		disk = dimStyle.Render(fmt.Sprintf("%14s", "---"))
+		seen = dimStyle.Render(fmt.Sprintf("%10s", lastSeen))
 	}
 
-	row := fmt.Sprintf("%-20s %-10s %8s %8s %8s %15s",
-		id, status, cpu, ram, disk, lastSeen)
+	return fmt.Sprintf("%-22s %s   %s   %s   %s   %s\n",
+		truncate(id, 20), status, cpu, ram, disk, seen)
+}
 
-	return rowStyle.Render(row) + "\n"
+// renderBar returns a 8-char visual bar for a percentage value, Green below 60, yellow 60-80, red above 80.
+func renderBar(pct float64) string {
+	const width = 6
+	filled := int((pct / 100.0) * width)
+	if filled > width {
+		filled = width
+	}
+
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+
+	switch {
+	case pct >= 80:
+		return barDangerStyle.Render(bar)
+	case pct >= 60:
+		return barWarningStyle.Render(bar)
+	default:
+		return barNormalStyle.Render(bar)
+	}
+}
+
+// truncate shortens a string to max length, adding … if cut.
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-1] + "…"
 }
 
 func waitForSnapshot(ch <-chan ws.SnapshotMsg) tea.Cmd {

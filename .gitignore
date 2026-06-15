@@ -13,3 +13,7 @@ dist/
 
 # OS
 .DS_Store
+
+agent/.env
+server/.env
+dashboard/.env
