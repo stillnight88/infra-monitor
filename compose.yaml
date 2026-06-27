@@ -1,0 +1,46 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+
+    container_name: infra-monitor-server
+
+    env_file:
+      - ./server/.env
+
+    ports:
+      - "8080:8080"
+
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+
+    container_name: infra-monitor-agent
+
+    env_file:
+      - ./agent/.env
+
+    depends_on:
+      - server
+
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+
+    container_name: infra-monitor-dashboard
+
+    env_file:
+      - ./dashboard/.env
+
+    depends_on:
+      - server
+
+    stdin_open: true
+    tty: true

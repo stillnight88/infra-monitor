@@ -17,3 +17,6 @@ dist/
 agent/.env
 server/.env
 dashboard/.env
+
+compose.override.yaml
+*.tar
